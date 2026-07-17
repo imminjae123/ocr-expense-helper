@@ -1,0 +1,54 @@
+/* ===================================================
+   style.css — カスタムスタイル
+   Tailwind で表現できないもの（アニメーション・複合状態）のみ定義
+   =================================================== */
+
+/* ─── ドラッグ&ドロップ エリア ─────────────────────── */
+.drop-zone {
+  transition: background-color 0.2s, border-color 0.2s;
+}
+
+.drop-zone.drag-over {
+  background-color: #eff6ff;   /* blue-50 */
+  border-color: #3b82f6;       /* blue-500 */
+}
+
+/* ─── ローディングスピナー ──────────────────────────── */
+.spinner {
+  width: 40px;
+  height: 40px;
+  border: 3px solid #e5e7eb;   /* gray-200 */
+  border-top-color: #3b82f6;   /* blue-500 */
+  border-radius: 50%;
+  animation: spin 0.75s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ─── 編集モーダル オーバーレイ ─────────────────────── */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background-color: rgba(0, 0, 0, 0.45);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 50;
+}
+
+.modal-overlay.hidden {
+  display: none;
+}
+
+/* ─── テーブル行ホバー ──────────────────────────────── */
+#expenses-tbody tr:not(#empty-row):hover {
+  background-color: #f9fafb;   /* gray-50 */
+}
+
+#expenses-tbody td {
+  padding: 0.625rem 1rem 0.625rem 0;
+  border-bottom: 1px solid #f3f4f6;  /* gray-100 */
+  vertical-align: middle;
+}
