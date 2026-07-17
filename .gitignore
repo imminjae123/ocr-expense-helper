@@ -1,0 +1,13 @@
+# OSが自動生成する不要なシステムファイル
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# エディタ・開発環境の設定ファイル（任意）
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
