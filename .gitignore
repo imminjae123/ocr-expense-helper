@@ -3,7 +3,7 @@
 Thumbs.db
 desktop.ini
 
-# エディタ・開発環境の設定ファイル（任意）
+# エディタ・開発環境の設定ファイル
 .vscode/
 .idea/
 *.suo
@@ -11,3 +11,23 @@ desktop.ini
 *.njsproj
 *.sln
 *.swp
+
+# === 【追加】Python用の除外設定 ===
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# === 【追加】データベース・保存ファイル用の除外設定 ===
+# SQLiteのデータベース実体ファイルをGit管理から除外
+*.db
+*.sqlite3
+
+# アップロードされた画像の一時保存フォルダ（もし作成する場合）
+/app/uploads/
