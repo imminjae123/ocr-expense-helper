@@ -45,7 +45,7 @@ def _preprocess_image(img: Image.Image) -> Image.Image:
     OCR 精度を上げるための画像前処理。
     1. グレースケール化
     2. 300 DPI 相当になるよう拡大（短辺が 2000px 未満の場合）
-    3. Otsu 法による二値化
+    3. コントラスト強調（CLAHE 相当）→ 白飛び・黒潰れを防ぐ
     """
     # グレースケール
     img = img.convert("L")
@@ -59,12 +59,17 @@ def _preprocess_image(img: Image.Image) -> Image.Image:
         new_h = int(h * scale)
         img = img.resize((new_w, new_h), Image.LANCZOS)
 
-    # numpy で Otsu 二値化（白黒反転せずに済むよう thresh 超えを白に）
-    arr = np.array(img)
-    # 閾値: ヒストグラムの中央値ベース（Otsu より軽量）
-    threshold = np.mean(arr)
-    binary = np.where(arr >= threshold, 255, 0).astype(np.uint8)
-    return Image.fromarray(binary)
+    # コントラスト強調: 二値化より穏やかな処理で白飛び・黒潰れを防ぐ
+    # percentile ベースで正規化（暗部を黒・明部を白に引き延ばす）
+    arr = np.array(img, dtype=np.float32)
+    p_low  = float(np.percentile(arr, 5))   # 暗側 5%点
+    p_high = float(np.percentile(arr, 95))  # 明側 95%点
+    if p_high > p_low:
+        arr = (arr - p_low) / (p_high - p_low) * 255.0
+        arr = np.clip(arr, 0, 255).astype(np.uint8)
+    else:
+        arr = arr.astype(np.uint8)
+    return Image.fromarray(arr)
 
 
 def _normalize(text: str) -> str:
@@ -88,6 +93,11 @@ def _normalize(text: str) -> str:
     text = re.sub(r"\b(20\d{2})(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])\b", r"\1/\2/\3", text)
     # 日付行に年・月・日の漢字なしで数字が "2023 6 1" のようにバラバラに並ぶケースを補正
     text = re.sub(r"\b(20\d{2})\s+(1[0-2]|0?[1-9])\s+(3[01]|[12]\d|0?[1-9])\b", r"\1/\2/\3", text)
+    # 金額の数字間スペースを除去: "4 5 , 4 5 5" → "45,455"
+    # 数字1文字 + スペース + 数字1文字 が連続するパターンを結合
+    text = re.sub(r"(?<=\d) (?=\d)", "", text)
+    # カンマ前後のスペース除去: "45 , 455" → "45,455"
+    text = re.sub(r"\s*,\s*(?=\d)", ",", text)
     return text
 
 
@@ -105,14 +115,17 @@ RE_DATE = re.compile(
     r")"
 )
 
-# 金額：¥ 50,000 / ￥50000 / 50,000円 / 合計 50,000
-# ¥ と数字の間のスペース・数字内のスペースを吸収
+# 金額：¥ 50,000 / ￥50000 / 50,000円 / 合計 50,000 / 金額 45,455
+# ¥ と数字の間・数字間のスペースを吸収
 # 末尾の「-」「–」は _normalize で除去済み
 RE_AMOUNT = re.compile(
     r"(?:"
-    r"(?:合\s*計|小\s*計|税\s*込\s*合\s*計|税\s*込|お\s*買\s*上\s*げ\s*合\s*計)"
-    r"\s*[¥￥\\Y]?\s*([\d][\d,\s]*)"                             # ラベル付き
-    r"|[¥￥\\Y]\s*([\d][\d,\s]*)"                                 # ¥記号付き
+    # ラベル付き（合計/小計/税込/金額 など。スペース混じりに対応）
+    r"(?:合\s*計|小\s*計|税\s*込\s*合\s*計|税\s*込|お\s*買\s*上\s*げ\s*合\s*計"
+    r"|金\s*額|請\s*求\s*金\s*額|ご\s*請\s*求\s*金\s*額|領\s*収\s*金\s*額"
+    r"|お\s*支\s*払\s*金\s*額|お\s*買\s*上\s*金\s*額)"
+    r"\s*[¥￥\\Y]?\s*([\d][\d,\s]*)"
+    r"|[¥￥\\Y]\s*([\d][\d,\s]*)"                                 # ¥/￥ 記号付き
     r"|([\d][\d,\s]*\d)\s*円"                                     # 〜円（2桁以上）
     r")"
 )
@@ -137,6 +150,29 @@ def _clean_number(raw: str) -> int | None:
         return None
 
 
+# 税抜・消費税ラベル（合算フォールバック用）
+RE_TAX_EXCL = re.compile(
+    r"(?:税\s*抜\s*(?:金\s*額)?|本\s*体\s*(?:価\s*格)?|小\s*計)"
+    r"\s*[¥￥\\Y]?\s*([\d][\d,]*)"
+)
+RE_TAX_AMT = re.compile(
+    r"(?:消\s*費\s*税\s*(?:額)?|税\s*額|内\s*消\s*費\s*税)"
+    r"\s*[¥￥\\Y]?\s*([\d][\d,]*)"
+)
+
+
+def _extract_amounts(text: str) -> list[int]:
+    """正規化済みテキストから金額候補を全て抽出して返す。"""
+    results = []
+    for m in RE_AMOUNT.finditer(text):
+        raw = next(filter(None, m.groups()), None)
+        if raw:
+            val = _clean_number(raw)
+            if val is not None and val >= 100:
+                results.append(val)
+    return results
+
+
 def parse_ocr_text(text: str) -> dict:
     """OCR テキストから日付・金額・支払先を抽出して返す。"""
     text = _normalize(text)
@@ -159,18 +195,27 @@ def parse_ocr_text(text: str) -> dict:
             y, mo, d = str(2018 + int(g[9])), g[10], g[11]
         date_str = f"{y}/{mo.zfill(2)}/{d.zfill(2)}"
 
-    # ── 金額（最大値を採用 — 合計行・¥表記を優先） ───────────────
-    # 「税抜金額 ¥45,455」「消費税額 ¥4,545」よりも「¥ 50,000」を最大値として拾う
-    amount_str = ""
-    amounts = []
-    for m in RE_AMOUNT.finditer(text):
-        raw = next(filter(None, m.groups()), None)
-        if raw:
-            val = _clean_number(raw)
-            if val is not None and val >= 100:  # 10円未満のノイズを除外
-                amounts.append(val)
-    if amounts:
-        amount_str = f"¥{max(amounts):,}"
+    # ── 金額 ─────────────────────────────────────────────────────
+    # 戦略1: 合計・¥記号・〜円 でマッチした全金額の最大値
+    amounts = _extract_amounts(text)
+    amount_val = max(amounts) if amounts else None
+
+    # 戦略2（フォールバック）: 税抜金額 + 消費税額 を合算
+    # → 戦略1で取れた値が「税抜金額」だけの可能性がある場合に使う
+    #   判定: 税抜ラベル付き金額が最大値と一致 → 合算を試みる
+    if amount_val is not None:
+        m_excl = RE_TAX_EXCL.search(text)
+        m_tax  = RE_TAX_AMT.search(text)
+        if m_excl and m_tax:
+            excl_val = _clean_number(m_excl.group(1))
+            tax_val  = _clean_number(m_tax.group(1))
+            if excl_val and tax_val:
+                summed = excl_val + tax_val
+                # 合算値が現在の最大値より大きければ採用
+                if summed > amount_val:
+                    amount_val = summed
+
+    amount_str = f"¥{amount_val:,}" if amount_val else ""
 
     # ── 支払先（発行元） ─────────────────────────────────────────
     vendor_str = ""
@@ -223,17 +268,35 @@ app = FastAPI(title="OCR 経費精算ヘルパー", lifespan=lifespan)
 # API エンドポイント（/api/* は StaticFiles より先に定義すること）
 # ────────────────────────────────────────────────────────────────────────────
 
+def _run_ocr(img: Image.Image) -> str:
+    """
+    PSM 6（均一ブロック）と PSM 11（散在テキスト）の両方で OCR を実行し、
+    結果を改行で連結して返す。
+    - PSM 6: 本文・ラベル行を取りやすい
+    - PSM 11: 中央の大きな孤立数字（合計金額）を取りやすい
+    """
+    text_psm6  = pytesseract.image_to_string(img, lang="jpn+eng", config="--psm 6  --oem 1")
+    text_psm11 = pytesseract.image_to_string(img, lang="jpn+eng", config="--psm 11 --oem 1")
+    return text_psm6 + "\n" + text_psm11
+
+
 @app.post("/api/ocr-debug")
 async def ocr_debug(file: UploadFile = File(...)):
     """開発用：OCR 生テキストをそのまま返す（本番では削除可）。"""
     contents = await file.read()
     img = Image.open(io.BytesIO(contents))
     img = _preprocess_image(img)
-    custom_config = r"--psm 6 --oem 1"
-    raw = pytesseract.image_to_string(img, lang="jpn+eng", config=custom_config)
-    normalized = _normalize(raw)
-    parsed = parse_ocr_text(raw)
-    return {"raw": raw, "normalized": normalized, "parsed": parsed}
+    raw_psm6  = pytesseract.image_to_string(img, lang="jpn+eng", config="--psm 6  --oem 1")
+    raw_psm11 = pytesseract.image_to_string(img, lang="jpn+eng", config="--psm 11 --oem 1")
+    raw_merged = raw_psm6 + "\n" + raw_psm11
+    parsed = parse_ocr_text(raw_merged)
+    return {
+        "raw_psm6": raw_psm6,
+        "raw_psm11": raw_psm11,
+        "merged": raw_merged,
+        "normalized": _normalize(raw_merged),
+        "parsed": parsed,
+    }
 
 
 @app.post("/api/upload")
@@ -245,7 +308,6 @@ async def upload_receipt(file: UploadFile = File(...)):
             status_code=415,
             detail="JPEG または PNG のみアップロード可能です。",
         )
-    # サイズチェック：先にヘッダー情報を確認し、不明な場合は読み取り後に確認
     contents = await file.read()
     if len(contents) > MAX_FILE_SIZE:
         raise HTTPException(
@@ -253,15 +315,11 @@ async def upload_receipt(file: UploadFile = File(...)):
             detail="ファイルサイズは 10MB 以内にしてください。",
         )
 
-    # ── 画像前処理 + OCR ────────────────────────────────────
+    # ── 画像前処理 + OCR（PSM 6 & 11 マージ）───────────────
     try:
         img = Image.open(io.BytesIO(contents))
         img = _preprocess_image(img)
-        # --psm 6: 均一テキストブロックとして処理（領収書に最適）
-        # --oem 1: LSTM エンジンのみ使用（精度が高い）
-        # jpn+eng: 日英混在に対応
-        custom_config = r"--psm 6 --oem 1"
-        raw_text = pytesseract.image_to_string(img, lang="jpn+eng", config=custom_config)
+        raw_text = _run_ocr(img)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"OCR 処理に失敗しました: {e}")
 
